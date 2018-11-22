@@ -23,7 +23,11 @@ requisite to a pkg.installed state for the package which provides pip
 from __future__ import absolute_import, print_function, unicode_literals
 import re
 import logging
-import pkg_resources
+try:
+    import pkg_resources
+    HAS_PKG_RESOURCES = True
+except ImportError:
+    HAS_PKG_RESOURCES = False
 
 # Import salt libs
 import salt.utils.versions
@@ -42,10 +46,15 @@ except ImportError:
 if HAS_PIP is True:
     try:
         from pip.req import InstallRequirement
+        _from_line = InstallRequirement.from_line
     except ImportError:
         # pip 10.0.0 move req module under pip._internal
         try:
-            from pip._internal.req import InstallRequirement
+            try:
+                from pip._internal.req import InstallRequirement
+                _from_line = InstallRequirement.from_line
+            except AttributeError:
+                from pip._internal.req.constructors import install_req_from_line as _from_line
         except ImportError:
             HAS_PIP = False
             # Remove references to the loaded pip module above so reloading works
@@ -71,6 +80,8 @@ def __virtual__():
     '''
     Only load if the pip module is available in __salt__
     '''
+    if HAS_PKG_RESOURCES is False:
+        return False, 'The pkg_resources python library is not installed'
     if 'pip.list' in __salt__:
         return __virtualname__
     return False
@@ -131,7 +142,7 @@ def _check_pkg_version_format(pkg):
             # The next line is meant to trigger an AttributeError and
             # handle lower pip versions
             log.debug('Installed pip version: %s', pip.__version__)
-            install_req = InstallRequirement.from_line(pkg)
+            install_req = _from_line(pkg)
         except AttributeError:
             log.debug('Installed pip version is lower than 1.2')
             supported_vcs = ('git', 'svn', 'hg', 'bzr')
@@ -139,12 +150,12 @@ def _check_pkg_version_format(pkg):
                 for vcs in supported_vcs:
                     if pkg.startswith(vcs):
                         from_vcs = True
-                        install_req = InstallRequirement.from_line(
+                        install_req = _from_line(
                             pkg.split('{0}+'.format(vcs))[-1]
                         )
                         break
             else:
-                install_req = InstallRequirement.from_line(pkg)
+                install_req = _from_line(pkg)
     except (ValueError, InstallationError) as exc:
         ret['result'] = False
         if not from_vcs and '=' in pkg and '==' not in pkg:
@@ -182,25 +193,45 @@ def _check_pkg_version_format(pkg):
     return ret
 
 
-def _check_if_installed(prefix, state_pkg_name, version_spec,
-                        ignore_installed, force_reinstall,
-                        upgrade, user, cwd, bin_env, env_vars,
-                        index_url):
-    # result: None means the command failed to run
-    # result: True means the package is installed
-    # result: False means the package is not installed
+def _check_if_installed(prefix,
+                        state_pkg_name,
+                        version_spec,
+                        ignore_installed,
+                        force_reinstall,
+                        upgrade,
+                        user,
+                        cwd,
+                        bin_env,
+                        env_vars,
+                        index_url,
+                        extra_index_url,
+                        pip_list=False,
+                        **kwargs):
+    '''
+    Takes a package name and version specification (if any) and checks it is
+    installed
+
+    Keyword arguments include:
+        pip_list: optional dict of installed pip packages, and their versions,
+            to search through to check if the package is installed. If not
+            provided, one will be generated in this function by querying the
+            system.
+
+    Returns:
+     result: None means the command failed to run
+     result: True means the package is installed
+     result: False means the package is not installed
+    '''
     ret = {'result': False, 'comment': None}
 
-    # Check if the requested package is already installed.
-    try:
+    # If we are not passed a pip list, get one:
+    if not pip_list:
         pip_list = __salt__['pip.list'](prefix, bin_env=bin_env,
                                         user=user, cwd=cwd,
-                                        env_vars=env_vars)
-        prefix_realname = _find_key(prefix, pip_list)
-    except (CommandNotFoundError, CommandExecutionError) as err:
-        ret['result'] = None
-        ret['comment'] = 'Error installing \'{0}\': {1}'.format(state_pkg_name, err)
-        return ret
+                                        env_vars=env_vars, **kwargs)
+
+    # Check if the requested package is already installed.
+    prefix_realname = _find_key(prefix, pip_list)
 
     # If the package was already installed, check
     # the ignore_installed and force_reinstall flags
@@ -232,7 +263,7 @@ def _check_if_installed(prefix, state_pkg_name, version_spec,
             available_versions = __salt__['pip.list_all_versions'](
                 prefix_realname, bin_env=bin_env, include_alpha=include_alpha,
                 include_beta=include_beta, include_rc=include_rc, user=user,
-                cwd=cwd, index_url=index_url)
+                cwd=cwd, index_url=index_url, extra_index_url=extra_index_url)
             desired_version = ''
             if any(version_spec):
                 for version in reversed(available_versions):
@@ -313,7 +344,6 @@ def installed(name,
               install_options=None,
               global_options=None,
               user=None,
-              no_chown=False,
               cwd=None,
               pre_releases=False,
               cert=None,
@@ -326,7 +356,8 @@ def installed(name,
               trusted_host=None,
               no_cache_dir=False,
               cache_dir=None,
-              no_binary=None):
+              no_binary=None,
+              **kwargs):
     '''
     Make sure the package is installed
 
@@ -447,10 +478,6 @@ def installed(name,
 
     no_install
         Download and unpack all packages, but don't actually install them
-
-    no_chown
-        When user is given, do not attempt to copy and chown
-        a requirements file
 
     no_cache_dir:
         Disable the cache.
@@ -594,7 +621,6 @@ def installed(name,
 
     .. _`virtualenv`: http://www.virtualenv.org/en/latest/
     '''
-
     if pip_bin and not bin_env:
         bin_env = pip_bin
 
@@ -619,11 +645,16 @@ def installed(name,
     ret = {'name': ';'.join(pkgs), 'result': None,
            'comment': '', 'changes': {}}
 
+    try:
+        cur_version = __salt__['pip.version'](bin_env)
+    except (CommandNotFoundError, CommandExecutionError) as err:
+        ret['result'] = None
+        ret['comment'] = 'Error installing \'{0}\': {1}'.format(name, err)
+        return ret
     # Check that the pip binary supports the 'use_wheel' option
     if use_wheel:
         min_version = '1.4'
         max_version = '9.0.3'
-        cur_version = __salt__['pip.version'](bin_env)
         too_low = salt.utils.versions.compare(ver1=cur_version, oper='<', ver2=min_version)
         too_high = salt.utils.versions.compare(ver1=cur_version, oper='>', ver2=max_version)
         if too_low or too_high:
@@ -637,7 +668,6 @@ def installed(name,
     if no_use_wheel:
         min_version = '1.4'
         max_version = '9.0.3'
-        cur_version = __salt__['pip.version'](bin_env)
         too_low = salt.utils.versions.compare(ver1=cur_version, oper='<', ver2=min_version)
         too_high = salt.utils.versions.compare(ver1=cur_version, oper='>', ver2=max_version)
         if too_low or too_high:
@@ -650,7 +680,6 @@ def installed(name,
     # Check that the pip binary supports the 'no_binary' option
     if no_binary:
         min_version = '7.0.0'
-        cur_version = __salt__['pip.version'](bin_env)
         too_low = salt.utils.versions.compare(ver1=cur_version, oper='<', ver2=min_version)
         if too_low:
             ret['result'] = False
@@ -716,6 +745,14 @@ def installed(name,
     # No requirements case.
     # Check pre-existence of the requested packages.
     else:
+        # Attempt to pre-cache a the current pip list
+        try:
+            pip_list = __salt__['pip.list'](bin_env=bin_env, user=user, cwd=cwd)
+        # If we fail, then just send False, and we'll try again in the next function call
+        except Exception as exc:
+            log.exception(exc)
+            pip_list = False
+
         for prefix, state_pkg_name, version_spec in pkgs_details:
 
             if prefix:
@@ -724,7 +761,8 @@ def installed(name,
                 out = _check_if_installed(prefix, state_pkg_name, version_spec,
                                           ignore_installed, force_reinstall,
                                           upgrade, user, cwd, bin_env, env_vars,
-                                          index_url)
+                                          index_url, extra_index_url, pip_list,
+                                          **kwargs)
                 # If _check_if_installed result is None, something went wrong with
                 # the command running. This way we keep stateful output.
                 if out['result'] is None:
@@ -804,7 +842,6 @@ def installed(name,
         install_options=install_options,
         global_options=global_options,
         user=user,
-        no_chown=no_chown,
         cwd=cwd,
         pre_releases=pre_releases,
         cert=cert,
@@ -816,7 +853,8 @@ def installed(name,
         env_vars=env_vars,
         use_vt=use_vt,
         trusted_host=trusted_host,
-        no_cache_dir=no_cache_dir
+        no_cache_dir=no_cache_dir,
+        **kwargs
     )
 
     if pip_install_call and pip_install_call.get('retcode', 1) == 0:
@@ -872,7 +910,8 @@ def installed(name,
                 if prefix:
                     pipsearch = __salt__['pip.list'](prefix, bin_env,
                                                      user=user, cwd=cwd,
-                                                     env_vars=env_vars)
+                                                     env_vars=env_vars,
+                                                     **kwargs)
 
                     # If we didn't find the package in the system after
                     # installing it report it

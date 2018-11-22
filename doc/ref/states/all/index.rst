@@ -13,6 +13,7 @@ state modules
     acme
     alias
     alternatives
+    ansiblegate
     apache
     apache_conf
     apache_module
@@ -26,6 +27,7 @@ state modules
     beacon
     bigip
     blockdev
+    bluecoat_sslv
     boto3_elasticache
     boto3_route53
     boto_apigateway
@@ -68,6 +70,7 @@ state modules
     cloud
     cmd
     composer
+    consul
     cron
     csf
     cyg
@@ -75,7 +78,6 @@ state modules
     debconfmod
     dellchassis
     disk
-    docker
     docker_container
     docker_image
     docker_network
@@ -125,7 +127,6 @@ state modules
     influxdb_database
     influxdb_retention_policy
     influxdb_user
-    infoblox
     infoblox_a
     infoblox_cname
     infoblox_host_record
@@ -137,7 +138,6 @@ state modules
     jboss7
     jenkins
     junos
-    k8s
     kapacitor
     kernelpkg
     keyboard
@@ -309,19 +309,22 @@ state modules
     win_smtp_server
     win_snmp
     win_system
-    win_update
     win_wua
     winrepo
     x509
     xmpp
+    zabbix_action
     zabbix_host
     zabbix_hostgroup
     zabbix_mediatype
+    zabbix_template
     zabbix_user
     zabbix_usergroup
+    zabbix_valuemap
     zcbuildout
     zenoss
     zk_concurrency
     zfs
     zone
+    zookeeper
     zpool
